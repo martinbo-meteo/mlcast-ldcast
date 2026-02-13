@@ -142,17 +142,18 @@ class NowcastingLightningModule(L.LightningModule):
             Loss value for the current batch
         """
         x, y = batch
-        predictions = self.forward(x, n_timesteps=y.shape[1])
+        predictions = self.forward(x, n_timesteps=4)
         loss = self.loss(predictions, y)
         if isinstance(loss, dict):
             # append step name to loss keys for logging
-            loss = {f"{step_name}/{k}": v.item() for k, v in loss}
+            loss = {f"{step_name}/{k}": v for k, v in loss.items()}
             self.log_dict(loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-            loss = loss.get("loss", loss.get("total_loss", None))
+            loss = loss.get(f"{step_name}/total_loss", None)
             if loss is None:
                 raise ValueError(f"Loss is None for step {step_name}. Ensure loss function returns a valid tensor.")
         else:
             self.log(f"{step_name}/loss", loss.item(), on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        
         return loss
 
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:

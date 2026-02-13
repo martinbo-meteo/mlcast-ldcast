@@ -1,3 +1,5 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/nowcast/nowcast.py, but removed the Nowcaster, AFNONowcastNetBasic and AFNONowcastNet classes because they were not used. Reworked also the two remaining classes (FusionBlock3D and AFNONowcastNetBase) to simplify the code by removing the unused parts.
+
 import collections
 
 import torch

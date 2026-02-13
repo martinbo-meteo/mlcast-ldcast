@@ -1,83 +1,101 @@
-# mlcast
+# MLCast implementation of LDCast
 
-<!-- SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause -->
+see main branch ([https://github.com/mlcast-community/mlcast]) for details.
 
-The MLCast Community is a collaborative effort bringing together meteorological services, research institutions, and academia across Europe to develop a unified Python package for AI-based nowcasting. This is an initiative of the E-AI WG6 (Nowcasting) of EUMETNET.
+# Main LDCast class
 
-This repo contains the `mlcast` package for machine learning-based weather nowcasting.
-
-## Project Status
-
-⚠️ **Under Development** - This package is currently in early development stages and not usable by end users. The API and functionality are subject to change.
-
-## Installation
-```bash
-# Install from pypi
-pip install mlcast
-```
-
-or
-```bash
-# Install from source
-git clone https://github.com/mlcast-community/mlcast
-cd mlcast
-uv pip install -e .
-
-# For development
-uv pip install -e ".[dev]"
-```
-
-## Project Structure
+The main class is LDCast and takes an autoencoder and a latent_nowcaster modules. Only the predict method is implemented, to show the encode-latent_nowcasting-decode pattern.
 
 ```
-mlcast/
-├── src/mlcast/          # Main package source code
-│   ├── __init__.py      # Package initialization and version
-│   ├── data/            # Data loading and preprocessing
-│   │   ├── zarr_datamodule.py   # PyTorch Lightning data module for Zarr
-│   │   └── zarr_dataset.py      # PyTorch dataset for Zarr arrays
-│   ├── models/          # Lightning model implementations
-│   │   └── base.py      # Abstract base classes for nowcasting models
-│   └── modules/         # Pure PyTorch neural network modules
-│       └── convgru_modules.py   # ConvGRU encoder-decoder modules
-├── examples/            # Example scripts and notebooks
-│   └── scripts/
-│       └── simple_train.py      # Basic training example
-├── pyproject.toml       # Project metadata and dependencies
-├── LICENSE              # Apache 2.0 license
-└── README.md            # This file
+from src.mlcast.models.ldcast.ldcast import LDCast
+ldcast = LDCast(autoencoder, latent_nowcaster)
 ```
 
-## Development
+# Autoencoder
 
-This project uses `uv` for dependency management. To set up the development environment:
+```
+from src.mlcast.models.ldcast.autoenc.autoenc import AutoencoderKLNet, autoenc_loss
+from src.mlcast.models.base import NowcastingLightningModule
+autoencoder = NowcastingLightningModule(AutoencoderKLNet(), autoenc_loss()).to('cuda')
+```
+The autoencoder is an instance of the NowcastingLightningModule. Training the autoencoder:
+```
+# create fake data
+x = torch.randn(2, 1, 4, 256, 256, device = 'cuda', requires_grad = False)
+y = autoencoder(x, 4)[0]
+y = y.detach()
+batch = (x, y)
 
-```bash
-# Install uv if not already installed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install dependencies
-uv sync
-
-# Run pre-commit hooks
-uv run pre-commit install
+import pytorch_lightning as L
+trainer = L.Trainer()
+trainer.fit(autoencoder, batch)
 ```
 
-## Contributing
+# Latent nowcaster (= conditioner + denoiser + samplers)
+The latent nowcaster manages the conditioner, the denoiser and the samplers. There can be two different samplers for training and for inference.
+```
+# setup forecaster
+conditioner = AFNONowcastNetCascade(
+    32,
+    train_autoenc=False,
+    output_patches=future_timesteps//autoenc_time_ratio,
+    cascade_depth=3,
+    embed_dim=128,
+    analysis_depth=4
+).to('cuda')
 
-Please feel free to raise issues or PRs if you have any suggestions or questions.
+# setup denoiser
+from src.mlcast.models.ldcast.diffusion.unet import UNetModel
+denoiser = UNetModel(in_channels=autoencoder.net.hidden_width,
+    model_channels=256, out_channels=autoencoder.net.hidden_width,
+    num_res_blocks=2, attention_resolutions=(1,2), 
+    dims=3, channel_mult=(1, 2, 4), num_heads=8,
+    num_timesteps=future_timesteps//autoenc_time_ratio,
+    context_ch=[128, 256, 512] # context channels (= analysis_net.cascade_dims)
+                    ).to('cuda')
 
-## Links to presentations for discussion about the API
+# define the training and inference samplers
+training_sampler = SimpleSampler()
+inference_sampler = PLMSSampler(denoiser, 1000)
 
-- [2025/02/04 first design discussions](https://docs.google.com/presentation/d/1oWmnyxOfUMWgeQi0XyX4fX9YDMX1vl6h/edit?usp=drive_link&rtpof=true&sd=true)
+# define the latent_nowcaster
+from torch.nn import L1Loss
+from src.mlcast.models.ldcast.diffusion.diffusion import LatentNowcaster
+latent_nowcaster = LatentNowcaster(conditioner, denoiser, L1Loss(), training_sampler, inference_sampler)
+```
+Create fake data for inference and training:
+```
+inputs = torch.randn(2, 1, 4, 256, 256, device = 'cuda')
+target = torch.randn(2, 1, 20, 256, 256, device = 'cuda')
+loss = nn.L1Loss()
+autoencoder.eval()
+latent_inputs = autoencoder.net.encode(inputs)[0].detach()
+latent_target = autoencoder.net.encode(target)[0].detach()
+```
+Inference with the latent_nowcaster (PLMSSampler is used during inference)
+```
+latent_nowcaster.infer(latent_inputs)
+```
+Training the latent_nowcaster (SimpleSampler is used during training)
+```
+from torch.utils.data import DataLoader, TensorDataset
+dataset = TensorDataset(latent_inputs, latent_target)
+dataloader = DataLoader(dataset, batch_size=2)
 
-## License
+latent_batch = (latent_inputs, latent_target)
+import pytorch_lightning as L
+trainer = L.Trainer()
+trainer.fit(latent_nowcaster, dataloader)
+```
 
-This project is dual-licensed under either:
+# Notes
 
-* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-* BSD 3-Clause License ([LICENSE-BSD](LICENSE-BSD) or https://opensource.org/licenses/BSD-3-Clause)
+I did not manage to make LatentNowcaster a sublcass of NowcastingLightningModule because I would basically have to overwrite everything... LatentNowcaster needs two nets (denoiser and conditioner) and the training logic is not as straightforward as it is for the moment in NowcastingLightningModule. One should also take into account the fact that two different samplers are used for training and inference, so that the forward method can not just be self.net(x)
 
-at your option.
+It would be nice to have cleaner and consistent APIs for the samplers. For the moment, the PLMSSampler and the SimpleSampler are not totally consistent in their APIs, because the SimpleSampler (better/more common name for this one?) was only used during training, while the PLMSSampler was used during inference. The handling of the schedule of each sampler with respect to the schedule saved in the denoiser could also be clearer.
 
-See [LICENSE](LICENSE) for more details.
+During training, an EMA scope was used for the weights of the denoiser, I removed this for the moment, but it should reincluded in some way.
+
+The 'timesteps' variable sometimes refers to the timesteps of the diffusion process (= 1000 during training) and sometimes refers to the nowcasting timesteps (where each time step = 5 minutes). Better to have different names.
+
+In /src/mlcast/models/ldcast/diffusion/diffusion.py, one has to choose which sampler to use for testing

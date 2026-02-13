@@ -1,3 +1,5 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/genforecast/analysis.py
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -21,8 +23,11 @@ class AFNONowcastNetCascade(AFNONowcastNetBase):
             )
             ch = ch_out
 
-    def forward(self, x, timesteps):
-        x = super().forward(x, timesteps)
+    def forward(self, x):
+        # the past timesteps are needed here, but they are always the same...
+        # need to expand timesteps because of the AFNONowcastNetBase.add_pos_enc method, not sure why
+        past_timesteps = torch.tensor([-3, -2, -1, 0], device = 'cuda', dtype = torch.float32).unsqueeze(0).expand(1,-1)
+        x = super().forward(x, past_timesteps)
         img_shape = tuple(x.shape[-2:])
         cascade = {img_shape: x}
         for i in range(self.cascade_depth-1):

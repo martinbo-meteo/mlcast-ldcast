@@ -1,3 +1,5 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/blocks/attention.py
+
 import math
 
 import torch

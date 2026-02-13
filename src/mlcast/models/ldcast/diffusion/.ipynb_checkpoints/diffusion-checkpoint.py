@@ -1,220 +1,132 @@
-"""
-From https://github.com/CompVis/latent-diffusion/main/ldm/models/diffusion/ddpm.py
-Pared down to simplify code.
-
-The original file acknowledges:
-https://github.com/lucidrains/denoising-diffusion-pytorch/blob/7706bdfc6f527f58d33f84b7b522e61e6e3164b3/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
-https://github.com/openai/improved-diffusion/blob/e94489283bb876ac1477d5dd7709bbbd2d9902ce/improved_diffusion/gaussian_diffusion.py
-https://github.com/CompVis/taming-transformers
-"""
-
 import torch
 import torch.nn as nn
-import numpy as np
-import pytorch_lightning as pl
-from contextlib import contextmanager
-from functools import partial
-
+import pytorch_lightning as L
+from typing import Any
 import contextlib
 
-from .utils import make_beta_schedule, extract_into_tensor, noise_like, timestep_embedding
-from .ema import LitEma
-from ..blocks.afno import PatchEmbed3d, PatchExpand3d, AFNOBlock3d
-from .plms import PLMSSampler
+print('take care of ema scope, which was used as context manager each exactly when denoiser.forward was called, so it should be a taken care of in the code code about the denoiser or about the diffuser (nothing to do with samplers)')  
 
-print('take care of ema scope')
+import pytorch_lightning as L
+class LatentNowcaster(L.LightningModule):
+    """Base class for PyTorch Lightning modules used in nowcasting models.
 
-class DiffusionModel(pl.LightningModule): # replaces LatentDiffusion
-    def __init__(self,
-        denoiser,
-        timesteps=1000,
-        beta_schedule="linear",
-        loss_type="l2",
-        use_ema=True,
-        lr=1e-4,
-        lr_warmup=0,
-        linear_start=1e-4,
-        linear_end=2e-2,
-        cosine_s=8e-3,
-        parameterization="eps",  # all assuming fixed variance schedules
+    This class provides a standard interface for training and validation
+    steps, as well as optimizer configuration.
+    """
+
+    def __init__(
+        self,
+        conditioner: nn.Module,
+        denoiser: nn.Module,
+        loss: nn.Module,
+        training_sampler: nn.Module,
+        inference_sampler: nn.Module,
+        optimizer_class: Any | None = None,
+        optimizer_kwargs: dict | None = None,
+        **kwargs: Any,
     ):
         super().__init__()
+        self.save_hyperparameters(ignore=["denoiser", "conditioner", "training_sampler", "inference_sampler", "loss"])
+        self.conditioner = conditioner
         self.denoiser = denoiser
-        self.lr = lr
-        self.lr_warmup = lr_warmup
+        self.loss = loss
+        self.training_sampler = training_sampler
+        self.inference_sampler = inference_sampler
+        self.optimizer_class = torch.optim.Adam if optimizer_class is None else optimizer_class
 
-        assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
-        self.parameterization = parameterization
+        training_sampler.register_schedule(denoiser)
+
+    def infer(self, latent_inputs, num_diffusion_iters = 50, verbose = True):
+
+        condition = self.conditioner(latent_inputs)
         
-        self.use_ema = use_ema
-        if self.use_ema:
-            self.denoiser_ema = LitEma(self.denoiser)
-
-        self.register_schedule(
-            beta_schedule=beta_schedule, timesteps=timesteps,
-            linear_start=linear_start, linear_end=linear_end, 
-            cosine_s=cosine_s
-        )
-
-        self.loss_type = loss_type
-
-        self.sampler = PLMSSampler(self.denoiser, timesteps)
-        
-    def forward(self, conditioning, num_diffusion_iters = 50, verbose = True):
         gen_shape = (32, 5, 256//4, 256//4)
+        batch_size = len(list(condition.values())[0])
         with contextlib.redirect_stdout(None):
-            (s, intermediates) = self.sampler.sample(
+            (s, intermediates) = self.inference_sampler.sample(
                 num_diffusion_iters, 
-                1, # batch_size
+                batch_size,
                 gen_shape,
-                self.q_sample,
-                conditioning,
+                condition,
                 progbar=verbose
             )
         return s
-    
-    def register_schedule(self, beta_schedule="linear", timesteps=1000,
-                          linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
 
-        betas = make_beta_schedule(
-            beta_schedule, timesteps,
-            linear_start=linear_start, linear_end=linear_end,
-            cosine_s=cosine_s
-        )
-        alphas = 1. - betas
-        alphas_cumprod = np.cumprod(alphas, axis=0)
-        alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
+    def model_step(self, latent_batch: Any, batch_idx: int, step_name: str = "train") -> torch.Tensor:
+        """Generic model step for training or validation.
 
-        timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
-        self.linear_start = linear_start
-        self.linear_end = linear_end
-        assert alphas_cumprod.shape[0] == self.num_timesteps, 'alphas have to be defined for each timestep'
+        Args:
+            batch: Input batch of data
+            batch_idx: Index of the current batch
 
-        to_torch = partial(torch.tensor, dtype=torch.float32)
-
-        self.denoiser.register_buffer('betas', to_torch(betas))
-        self.denoiser.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
-        self.denoiser.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        self.denoiser.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
-        self.denoiser.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
-
-    @contextmanager
-    def ema_scope(self, context=None):
-        if self.use_ema:
-            self.denoiser_ema.store(self.denoiser.parameters())
-            self.denoiser_ema.copy_to(self.denoiser)
-            if context is not None:
-                print(f"{context}: Switched to EMA weights")
-        try:
-            yield None
-        finally:
-            if self.use_ema:
-                self.denoiser_ema.restore(self.denoiser.parameters())
-                if context is not None:
-                    print(f"{context}: Restored training weights")
-
-    def q_sample(self, x_start, t, noise=None):
-        if noise is None:
-            noise = torch.randn_like(x_start)
-        return (
-            extract_into_tensor(self.denoiser.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-            extract_into_tensor(self.denoiser.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
-        )
-
-    def get_loss(self, pred, target, mean=True):
-        if self.loss_type == 'l1':
-            loss = (target - pred).abs()
-            if mean:
-                loss = loss.mean()
-        elif self.loss_type == 'l2':
-            if mean:
-                loss = torch.nn.functional.mse_loss(target, pred)
-            else:
-                loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
+        Returns:
+            Loss value for the current batch
+        """
+        latent_inputs, latent_targets = latent_batch
+        
+        condition = self.conditioner(latent_inputs)
+        t, noise, latent_target_noisy = self.training_sampler.q_sample(self.denoiser, latent_targets)
+        guessed_noise = self.denoiser(latent_target_noisy, t, context = condition)
+        loss = self.loss(guessed_noise, noise)
+        
+        if isinstance(loss, dict):
+            # append step name to loss keys for logging
+            loss = {f"{step_name}/{k}": v for k, v in loss.items()}
+            self.log_dict(loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+            loss = loss.get(f"{step_name}/total_loss", None)
+            if loss is None:
+                raise ValueError(f"Loss is None for step {step_name}. Ensure loss function returns a valid tensor.")
         else:
-            raise NotImplementedError("unknown loss type '{loss_type}'")
-
+            self.log(f"{step_name}/loss", loss.item(), on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        
         return loss
 
-    def p_losses(self, x_start, t, noise=None, context=None):
-        if noise is None:
-            noise = torch.randn_like(x_start)
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        denoised = self.denoiser(x_noisy, t, context=context)
+    def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
+        """Training step for a single batch.
 
-        if self.parameterization == "eps":
-            target = noise
-        elif self.parameterization == "x0":
-            target = x_start
-        else:
-            raise NotImplementedError(f"Parameterization {self.parameterization} not yet supported")
+        Args:
+            batch: Input batch of data
+            batch_idx: Index of the current batch
 
-        return self.get_loss(denoised, target, mean=False).mean()
-    '''
-    def forward(self, x, *args, **kwargs):
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
-        return self.p_losses(x, t, *args, **kwargs)
-    '''
-    '''
-    def shared_step(self, batch):
-        (x,y) = batch
-        y = self.autoencoder.encode(y)[0]
-        context = self.context_encoder(x) if self.conditional else None
-        return self(y, context=context)
-    '''
-    def training_step(self, batch, batch_idx):
-        loss = self.shared_step(batch)
-        self.log("train_loss", loss)
-        return loss
+        Returns:
+            Loss value for the current batch
+        """
+        return self.model_step(batch, batch_idx, step_name="train")
 
-    @torch.no_grad()
-    def validation_step(self, batch, batch_idx):
-        loss = self.shared_step(batch)
-        with self.ema_scope():
-            loss_ema = self.shared_step(batch)
-        log_params = {"on_step": False, "on_epoch": True, "prog_bar": True}
-        self.log("val_loss", loss, **log_params)
-        self.log("val_loss_ema", loss, **log_params)
+    def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
+        """Validation step for a single batch.
 
-    def on_train_batch_end(self, *args, **kwargs):
-        if self.use_ema:
-            self.denoiser_ema(self.denoiser)
+        Args:
+            batch: Input batch of data
+            batch_idx: Index of the current batch
 
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr,
-            betas=(0.5, 0.9), weight_decay=1e-3)
-        reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, patience=3, factor=0.25, verbose=True
-        )
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": reduce_lr,
-                "monitor": "val_loss_ema",
-                "frequency": 1,
-            },
-        }
+        Returns:
+            Loss value for the current batch
+        """
+        return self.model_step(batch, batch_idx, step_name="val")
+        
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+        """Configure the optimizer for training.
 
-    def optimizer_step(
-        self, 
-        epoch,
-        batch_idx,
-        optimizer,
-        optimizer_idx,
-        optimizer_closure,
-        **kwargs    
-    ):
-        if self.trainer.global_step < self.lr_warmup:
-            lr_scale = (self.trainer.global_step+1) / self.lr_warmup
-            for pg in optimizer.param_groups:
-                pg['lr'] = lr_scale * self.lr
-
-        super().optimizer_step(
-            epoch, batch_idx, optimizer,
-            optimizer_idx, optimizer_closure,
-            **kwargs
-        )
+        Returns:
+            Optimizer instance to use for training
+        """
+        return self.optimizer_class(self.parameters(), **(self.hparams.optimizer_kwargs or {}))
     
+
+    def on_train_start(self):
+        self._current_sampler = self.training_sampler
+        super().on_train_start()
+    
+    def on_validation_start(self):
+        self._current_sampler_mode = self.training_sampler
+        super().on_validation_start()
+    
+    def on_predict_start(self):
+        self._current_sampler_mode = self.inference_sampler
+        super().on_predict_start()
+    
+    def on_test_start(self):
+        # training or inference sampler ???
+        self._current_sampler_mode = self.training_sampler
+        super().on_test_start()

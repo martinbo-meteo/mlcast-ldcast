@@ -1,3 +1,5 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/diffusion/utils.py
+
 # adopted from
 # https://github.com/openai/improved-diffusion/blob/main/improved_diffusion/gaussian_diffusion.py
 # and

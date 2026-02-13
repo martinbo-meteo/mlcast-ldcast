@@ -1,3 +1,6 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/diffusion/plms.py, but changed model.apply_model into model.forward
+
+
 """
 From: https://github.com/CompVis/latent-diffusion/blob/main/ldm/models/diffusion/plms.py
 """
@@ -38,7 +41,8 @@ class PLMSSampler:
         assert (
             alphas_cumprod.shape[0] == self.ddpm_num_timesteps
         ), "alphas have to be defined for each timestep"
-        to_torch = lambda x: x.clone().detach().to(torch.float32).to(self.model.device)
+        device = next(self.model.parameters()).device
+        to_torch = lambda x: x.clone().detach().to(torch.float32).to(device)
 
         self.register_buffer("betas", to_torch(self.model.betas))
         self.register_buffer("alphas_cumprod", to_torch(alphas_cumprod))
@@ -93,19 +97,15 @@ class PLMSSampler:
         S,
         batch_size,
         shape,
-        q_sample_func,
         conditioning=None,
         callback=None,
         normals_sequence=None,
         img_callback=None,
         quantize_x0=False,
         eta=0.0,
-        mask=None,
         x0=None,
         temperature=1.0,
         noise_dropout=0.0,
-        score_corrector=None,
-        corrector_kwargs=None,
         verbose=True,
         x_T=None,
         log_every_t=100,
@@ -133,17 +133,13 @@ class PLMSSampler:
         samples, intermediates = self.plms_sampling(
             conditioning,
             size,
-            q_sample_func,
             callback=callback,
             img_callback=img_callback,
             quantize_denoised=quantize_x0,
-            mask=mask,
             x0=x0,
             ddim_use_original_steps=False,
             noise_dropout=noise_dropout,
             temperature=temperature,
-            score_corrector=score_corrector,
-            corrector_kwargs=corrector_kwargs,
             x_T=x_T,
             log_every_t=log_every_t,
             unconditional_guidance_scale=unconditional_guidance_scale,
@@ -157,7 +153,6 @@ class PLMSSampler:
         self,
         cond,
         shape,
-        q_sample_func,
         x_T=None,
         ddim_use_original_steps=False,
         callback=None,
@@ -170,7 +165,6 @@ class PLMSSampler:
         temperature=1.0,
         noise_dropout=0.0,
         score_corrector=None,
-        corrector_kwargs=None,
         unconditional_guidance_scale=1.0,
         unconditional_conditioning=None,
         progbar=True,
@@ -222,14 +216,6 @@ class PLMSSampler:
                 dtype=torch.long,
             )
 
-            if mask is not None:
-                assert x0 is not None
-                img_orig = q_sample_func(
-                    x0, ts
-                )  # TODO: deterministic forward pass?
-                print('after q_sample 1', img_orig.shape)
-                img = img_orig * mask + (1.0 - mask) * img
-                print('after q_sample 2', img.shape)
             outs = self.p_sample_plms(
                 img,
                 cond,
@@ -239,8 +225,6 @@ class PLMSSampler:
                 quantize_denoised=quantize_denoised,
                 temperature=temperature,
                 noise_dropout=noise_dropout,
-                score_corrector=score_corrector,
-                corrector_kwargs=corrector_kwargs,
                 unconditional_guidance_scale=unconditional_guidance_scale,
                 unconditional_conditioning=unconditional_conditioning,
                 old_eps=old_eps,
@@ -273,8 +257,6 @@ class PLMSSampler:
         quantize_denoised=False,
         temperature=1.0,
         noise_dropout=0.0,
-        score_corrector=None,
-        corrector_kwargs=None,
         unconditional_guidance_scale=1.0,
         unconditional_conditioning=None,
         old_eps=None,
@@ -297,11 +279,7 @@ class PLMSSampler:
                 e_t_uncond, e_t = self.model.apply_denoiser(x_in, t_in, c_in).chunk(2)
                 e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
                 '''
-            if score_corrector is not None:
-                assert self.model.parameterization == "eps"
-                e_t = score_corrector.modify_score(
-                    self.model, e_t, x, t, condition, **corrector_kwargs
-                )
+            
 
             return e_t
 

@@ -1,3 +1,5 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/genforecast/unet.py: weirdly, this part (which is the denoiser) was in not in the diffusion folder in the original code
+
 from abc import abstractmethod
 from functools import partial
 import math
@@ -464,7 +466,7 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
         )
-        self.device = next(self.parameters()).device
+
     def forward(self, x, timesteps=None, context=None):
         """
         Apply the model to an input batch.

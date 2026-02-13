@@ -1,3 +1,5 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/blocks/afno.py
+
 #reference: https://github.com/NVlabs/AFNO-transformer
 import numpy as np
 import torch
@@ -336,7 +338,7 @@ class AFNOCrossAttentionBlock3d(nn.Module):
             # AFNO natively uses a channels-last order
             x = x.permute(0,2,3,4,1)
             y = y.permute(0,2,3,4,1)
-
+            
         xy = torch.concat((self.norm1(x),y), axis=-1)
         xy = self.pre_proj(xy) + xy
         xy = self.filter(self.norm2(xy)) + xy # AFNO filter

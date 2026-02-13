@@ -1,3 +1,5 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/autoenc/autoenc.py
+
 import numpy as np
 import torch.nn as nn
 

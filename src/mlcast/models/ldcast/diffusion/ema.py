@@ -1,3 +1,5 @@
+# from https://github.com/MeteoSwiss/ldcast/blob/master/ldcast/models/diffusion/ema.py
+
 import torch
 from torch import nn
 
